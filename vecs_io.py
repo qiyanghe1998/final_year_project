@@ -58,7 +58,7 @@ def ivecs_writer(filename, vecs):
     f.close()
 
 
-def loader(data_set='audio', top_k=20, ground_metric='euclid', folder='./data/', data_type='fvecs'):
+def loader(data_set='audio', top_k=20, ground_metric='euclid', folder='../data/', data_type='fvecs'):
     """
     :param data_set: data set you wanna load , audio, sift1m, ..
     :param top_k: how many nearest neighbor in ground truth file

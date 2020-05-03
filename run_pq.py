@@ -93,10 +93,15 @@ def try_effective(X, Q, compressed, dataset, topk=20, topnorm=5):
         writer.writerow(['real', '%d%%-%d%%' % (i * 5, (i + 1) * 5), (sum_real[i] / num_query)])
 
 
+def get_comrpessed(pq, X, T, Q, G, metric, train_size=100000, dataset='netflix', prune=False, top_norm=5):
+    print('# compress items')
+    return chunk_compress(pq, X)
+
+
 def execute(pq, X, T, Q, G, metric, train_size=100000, dataset='netflix', prune=False, top_norm=5):
     np.random.seed(123)
     print("# ranking metric {}".format(metric))
-    print("# "+pq.class_message())
+    print("# " + pq.class_message())
     if T is None:
         pq.fit(X[:train_size].astype(dtype=np.float32), iter=20)
     else:
@@ -115,13 +120,13 @@ def execute(pq, X, T, Q, G, metric, train_size=100000, dataset='netflix', prune=
 
     # print("expected avg error: {}\n".format(sum_error / len(X)))
 
-    #if prune:
+    # if prune:
     #    try_effective(X, Q, compressed, dataset)
 
     print("# sorting items")
-    #Ts = [1]
+    # Ts = [1]
     if prune:
-        #Ts = [2 ** i for i in range(2 + int(math.log2(len(X) * top_norm // 100)))]
+        # Ts = [2 ** i for i in range(2 + int(math.log2(len(X) * top_norm // 100)))]
         Ts = [2 ** i for i in range(2 + 12)]
         recalls = PruneBatchSorter(compressed, Q, X, G, Ts, metric=metric, batch_size=200, top_norm=top_norm).recall()
     else:
@@ -132,7 +137,37 @@ def execute(pq, X, T, Q, G, metric, train_size=100000, dataset='netflix', prune=
     print("expected items, overall time, avg recall, avg precision, avg error, avg items")
     for i, (t, recall) in enumerate(zip(Ts, recalls)):
         print("{}, {}, {}, {}, {}, {}".format(
-            2**i, 0, recall, recall * len(G[0]) / t, 0, t))
+            2 ** i, 0, recall, recall * len(G[0]) / t, 0, t))
+
+
+def train(pq, X, T, metric, train_size=100000, dataset='netflix', prune=False, top_norm=5):
+    np.random.seed(321)
+    print("# ranking metric {}".format(metric))
+    print("# " + pq.class_message())
+    if T is None:
+        pq.fit(X[:train_size].astype(dtype=np.float32), iter=20)
+    else:
+        pq.fit(T.astype(dtype=np.float32), iter=20)
+
+    # print('# compress items')
+    # compressed = chunk_compress(pq, X)
+
+
+def move_to_gpu(pq):
+    pq.move_to_gpu()
+
+
+def execute_on_device(pq, Q, X, G, metric, batch_query, gpu_index_flat, topk, batch_vecs, threads_per_block, top_norm):
+    Ts = [2 ** i for i in range(12)]
+    recalls = BatchHybridPruneSorter(pq, Q, X, G, Ts, metric, batch_query, gpu_index_flat, topk, batch_vecs,
+                                     threads_per_block, top_norm)
+
+    print("# searching!")
+
+    print("expected items, overall time, avg recall, avg precision, avg error, avg items")
+    for i, (t, recall) in enumerate(zip(Ts, recalls)):
+        print("{}, {}, {}, {}, {}, {}".format(
+            2 ** i, 0, recall, recall * len(G[0]) / t, 0, t))
 
 
 def parse_args():
@@ -145,10 +180,15 @@ def parse_args():
     parser.add_argument('--num_codebook', type=int, help='number of codebooks in one codebook group')
     parser.add_argument('--Ks', type=int, help='number of centroids in each quantizer')
     parser.add_argument('--num_group', type=int, help='number of codebook groups')
-    parser.add_argument('--prune', type=bool, help='use the top norm to prune')
+    parser.add_argument('--prune', type=int, help='use the top norm to prune')
     parser.add_argument('--top_norm', type=int, help='percentage of the top norm')
+    parser.add_argument('--batch_vecs', type=int, help='batch size of data processing')
+    parser.add_argument('--batch_query', type=int, help='batch size of query processing')
+    parser.add_argument('--threads_per_block', type=int, help='number of threads per block')
+
     args = parser.parse_args()
-    return args.dataset, args.topk, args.num_codebook, args.Ks, args.metric, args.num_group, args.prune, args.top_norm
+    return args.dataset, args.topk, args.num_codebook, args.Ks, args.metric, args.num_group, args.prune, \
+           args.top_norm, args.batch_vecs, args.batch_query, args.threads_per_block
 
 
 if __name__ == '__main__':
@@ -161,10 +201,12 @@ if __name__ == '__main__':
 
     # override default parameters with command line parameters
     import sys
+
     if len(sys.argv) > 3:
         dataset, topk, codebook, Ks, metric, group = parse_args()
     else:
         import warnings
+
         warnings.warn("Using  Default Parameters ")
     print("# Parameters: dataset = {}, topK = {}, codebook = {}, Ks = {}, metric = {}, group = {}"
           .format(dataset, topk, codebook, Ks, metric, group))

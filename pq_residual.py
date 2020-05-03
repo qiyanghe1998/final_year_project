@@ -1,6 +1,25 @@
 from __future__ import division
 from __future__ import print_function
 from pq_norm import *
+from numba import cuda
+
+# nq_kernel_code = """
+# __global__ void gpu_distance_cal_rq(ResidualPQ *rq, float *query, float *result, float *mid_coefficient, int start,
+#                                     int end, int num_dim, int length_pqs) {
+#     int idx = threadIdx.x + blockDim.x * blockIdx.x;
+#     if (start + idx < end) {
+#         for (int i = 0; i < length_pqs; ++i)
+#             gpu_distance_cal_pq(nq.pqs[i], query, result, mid_coefficient, start, end, num_dim)
+#     }
+# }
+# """
+
+
+# def gpu_distance_cal(self, query, result, mid_coefficient, start, end):
+#     idx = cuda.threadIdx.x + cuda.blockDim.x * cuda.blockIdx.x
+#     if start + idx < end:
+#         for pq in self.pqs:
+#             pq.gpu_distance_cal(pq, query, result, mid_coefficient, start, end)
 
 
 class ResidualPQ(object):
@@ -12,6 +31,8 @@ class ResidualPQ(object):
         self.code_dtype = pqs[0].code_dtype
         self.M = max([pq.M for pq in pqs])
         self.pqs = pqs
+        self.number = 0
+        self.compress_code_device = None
 
         for pq in self.pqs:
             assert pq.code_dtype == self.code_dtype
@@ -22,9 +43,12 @@ class ResidualPQ(object):
             messages += pq.class_message()
         return messages
 
-    def fit(self, T, iter, save_codebook=False, save_decoded=[], save_residue_norms=[], save_results_T=False, dataset_name=None, save_dir=None, D=None):
+    def fit(self, T, iter, save_codebook=False, save_decoded=[], save_residue_norms=[], save_results_T=False,
+            dataset_name=None, save_dir=None, D=None, open_cuda=False):
         assert T.dtype == np.float32
         assert T.ndim == 2
+
+        self.number = len(T)
 
         if save_dir is None:
             save_dir = './results'
@@ -35,10 +59,11 @@ class ResidualPQ(object):
             vecs_d = np.empty(shape=D.shape, dtype=D.dtype)
             vecs_d[:, :] = D[:, :]
         if save_codebook:
-            codebook_f = open(save_dir + '/' + dataset_name + '_rq_' + str(self.deep) + '_' + str(self.pqs[0].Ks) + '_codebook', 'wb')
+            codebook_f = open(
+                save_dir + '/' + dataset_name + '_rq_' + str(self.deep) + '_' + str(self.pqs[0].Ks) + '_codebook', 'wb')
 
         for layer, pq in enumerate(self.pqs):
-            pq.fit(vecs, iter)
+            pq.fit(vecs, iter, open_cuda)
             compressed = pq.compress(vecs)
             vecs = vecs - compressed
             del compressed
@@ -53,14 +78,16 @@ class ResidualPQ(object):
                       .format(layer, np.mean(norms), np.max(norms), np.min(norms)))
 
             if (layer + 1) in save_residue_norms:
-                with open(save_dir + '/' + dataset_name + '_rq_' + str(layer + 1) + '_' + str(self.pqs[0].Ks) + '_residue_norms', 'wb') as f:
+                with open(save_dir + '/' + dataset_name + '_rq_' + str(layer + 1) + '_' + str(
+                        self.pqs[0].Ks) + '_residue_norms', 'wb') as f:
                     if save_results_T:
                         np.linalg.norm(vecs, axis=1).tofile(f)
                     if D is not None:
                         np.linalg.norm(vecs_d, axis=1).tofile(f)
 
             if (layer + 1) in save_decoded:
-                with open(save_dir + '/' + dataset_name + '_rq_' + str(layer + 1) + '_' + str(self.pqs[0].Ks) + '_decoded', 'wb') as f:
+                with open(save_dir + '/' + dataset_name + '_rq_' + str(layer + 1) + '_' + str(
+                        self.pqs[0].Ks) + '_decoded', 'wb') as f:
                     if save_results_T:
                         (T - vecs).tofile(f)
                     if D is not None:
@@ -105,3 +132,21 @@ class ResidualPQ(object):
             del compressed
 
         return sum_residual
+
+    def move_to_gpu(self):
+        for layer, pq in enumerate(self.pqs):
+            pq.move_to_gpu()
+
+    def cal_lookup_table(self, query):
+        for layer, pq in enumerate(self.pqs):
+            pq.move_to_device(query)
+
+    @cuda.jit
+    def gpu_distance_cal(self, query, result, mid_coefficient, start, end):
+        idx = cuda.threadIdx.x + cuda.blockDim.x * cuda.blockIdx.x
+        if start + idx < end:
+            for pq in self.pqs:
+                pq.gpu_distance_cal(pq, query, result, mid_coefficient, start, end)
+
+
+

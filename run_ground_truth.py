@@ -14,7 +14,7 @@ def parse_args():
 
 
 def topk(data_set, top_ks, ground_metric):
-    folder = 'data/'
+    folder = '../data/'
     folder_path = folder + data_set
     base_file = folder_path + '/%s_base_sort.fvecs' % data_set
     query_file = folder_path + '/%s_query.fvecs' % data_set

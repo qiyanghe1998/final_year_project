@@ -1,8 +1,29 @@
 from pq import *
 from transformer import normalize
 import warnings
+from numba import cuda
 import math
 import tqdm
+
+
+# nq_kernel_code = """
+# __global__ void gpu_distance_cal_nq(NormPQ *nq, float *query, float *result, float *mid_coefficient, int start,
+#                                     int end, int num_dim, int length_pqs) {
+#     int idx = threadIdx.x + blockDim.x * blockIdx.x;
+#     if (start + idx < end) {
+#         mid_coefficient[idx] *= nq.percentiles_device[nq.compress_norm_device[start + idx]]
+#         gpu_distance_cal_rq(nq.quantize, query, result, mid_coefficient, start, end, num_dim, length_pqs)
+#     }
+# }
+# """
+
+
+# def gpu_distance_cal(self, query, result, mid_coefficient, start, end):
+#     idx = cuda.threadIdx.x + cuda.blockDim.x * cuda.blockIdx.x
+#     if start + idx < end:
+#         mid_coefficient[idx] = mid_coefficient[idx] * self.percentiles_device[self.compress_norm_device[idx]]
+#         self.quantize.gpu_distance_cal(self.quantize, query, result, mid_coefficient, start, end)
+
 
 class NormPQ(object):
     def __init__(self, n_percentile, quantize, true_norm=False, verbose=True, method='kmeans', recover='quantize'):
@@ -16,18 +37,22 @@ class NormPQ(object):
 
         self.percentiles = None
         self.quantize = quantize
+        self.percentiles_device = None
+        self.compress_norm_device = None
+        self.number = 0
 
     def class_message(self):
         return "NormPQ, percentiles: {}, quantize: {}".format(self.n_percentile, self.quantize.class_message())
 
-    def fit(self, vecs, iter):
+    def fit(self, vecs, iter, open_cuda=False):
         assert vecs.dtype == np.float32
         assert vecs.ndim == 2
         N, D = vecs.shape
         assert self.n_percentile < N, "the number of norm intervals should be more than Ks"
+        self.number = len(vecs)
 
         norms, normalized_vecs = normalize(vecs)
-        self.quantize.fit(normalized_vecs, iter)
+        self.quantize.fit(normalized_vecs, iter, open_cuda)
 
         if self.recover == 'quantize':
             compressed_vecs = self.quantize.compress(normalized_vecs)
@@ -66,6 +91,9 @@ class NormPQ(object):
             self.percentiles = np.array(self.percentiles, dtype=np.float32)
         else:
             assert False
+
+        if open_cuda:
+            self.compress_norm_device = cuda.to_device(self.encode_norm(norms))
 
         return self
 
@@ -107,3 +135,19 @@ class NormPQ(object):
             assert False
 
         return (compressed_vecs.transpose() * norms).transpose()
+
+    def move_to_gpu(self):
+        self.percentiles_device = cuda.to_device(self.percentiles)
+        self.quantize.move_to_gpu()
+
+    def cal_lookup_table(self, query):
+        self.quantize.cal_lookup_table(query)
+
+    @cuda.jit
+    def gpu_distance_cal(self, query, result, mid_coefficient, start, end):
+        idx = cuda.threadIdx.x + cuda.blockDim.x * cuda.blockIdx.x
+        if start + idx < end:
+            mid_coefficient[idx] = mid_coefficient[idx] * self.percentiles_device[self.compress_norm_device[idx]]
+            self.quantize.gpu_distance_cal(self.quantize, query, result, mid_coefficient, start, end)
+
+
